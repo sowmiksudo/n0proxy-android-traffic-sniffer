@@ -1,0 +1,3 @@
+frida-tools>=12.0.0
+hexdump
+colorama
