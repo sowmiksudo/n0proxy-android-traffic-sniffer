@@ -3,7 +3,7 @@ import sys
 import hexdump  # pip install hexdump
 
 # --- CONFIGURATION ---
-TARGET_APP = "com.example.app"  # Default target, can be made into an argparse arg later
+TARGET_APP = "com.danskebank.mobilebank3"  # Default target, can be made into an argparse arg later
 # ---------------------
 
 def on_message(message, data):
