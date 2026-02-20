@@ -24,7 +24,7 @@ Unlike proxy tools (Charles/Burp) which require configuring WiFi settings and CA
 
 1.  Clone this repository:
     ```bash
-    git clone [https://github.com/sowmiksudo/android-tcp-sniffer.git](https://github.com/sowmiksudo/android-tcp-sniffer.git)
+    git clone https://github.com/sowmiksudo/android-tcp-sniffer.git
     cd android-tcp-sniffer
     ```
 
@@ -59,6 +59,8 @@ Unlike proxy tools (Charles/Burp) which require configuring WiFi settings and CA
 ## Test
 This script was tested on android 14, rooted with magisk. MagiskFrida was used for frida server on android.
 
-## ⚠️ Disclaimer
+## Author
+@sowmiksudo | https://sowmiksudo.github.io
 
+## ⚠️ Disclaimer
 This tool is for **educational purposes and security research only**. Do not use it to intercept traffic from applications you do not own or have permission to test.
