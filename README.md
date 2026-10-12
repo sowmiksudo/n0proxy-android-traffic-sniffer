@@ -1,10 +1,37 @@
-# Android TCP Traffic Sniffer
+<p align="center">
+  <img src="images/github_banner.jpg" alt="Android TCP Sniffer Banner" width="100%">
+</p>
 
-A lightweight Python + Frida tool to **intercept, decrypt, and export Android application traffic directly into Burp Suite, Caido, OWASP ZAP, and Wireshark** in real-time — with **zero proxy configuration**, **no CA certificates**, and **100% immunity to SSL pinning**.
+<p align="center">
+  <img src="images/logo.jpg" alt="Android TCP Sniffer Logo" width="100" style="border-radius: 20px;">
+</p>
+
+<h1 align="center">Android TCP Traffic Sniffer</h1>
+
+<p align="center">
+  <b>A lightweight Python + Frida tool to intercept, decrypt, and export Android application traffic directly into Burp Suite, Caido, OWASP ZAP, and Wireshark in real-time.</b>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Zero_Proxy-100%25-10B981?style=for-the-badge&logo=android&logoColor=white" alt="Zero Proxy">
+  <img src="https://img.shields.io/badge/SSL_Pinning-Immune-0EA5E9?style=for-the-badge&logo=shield&logoColor=white" alt="SSL Pinning Immune">
+  <img src="https://img.shields.io/badge/Hooks-libc%20%7C%20libssl-6366F1?style=for-the-badge" alt="Native Hooks">
+  <img src="https://img.shields.io/badge/Export-Burp%20%7C%20Caido%20%7C%20Wireshark-F59E0B?style=for-the-badge" alt="Multi-Tool Export">
+</p>
+
+<p align="center">
+  <i>Zero proxy configuration &bull; No CA certificates &bull; 100% immunity to SSL pinning</i>
+</p>
+
+---
 
 Unlike traditional proxy setups that require complex Wi-Fi proxies, iptables redirection, and custom user certificate injection (which modern Android apps often block with Certificate Pinning or custom BoringSSL/Cronet/Flutter stacks), **Android TCP Sniffer hooks directly into Android's native memory space** (`libc.so`, `libssl.so`, `libboringssl.so`) to capture cleartext data before encryption. It automatically reassembles fragmented TCP streams into HTTP flows and exports them directly into industry-standard pentesting tools.
 
-![TCP Sniffer](images/tcp-sniffer.png)
+### 📸 Live Terminal Preview
+
+<p align="center">
+  <img src="images/tcp-sniffer.png" alt="TCP Sniffer Live Preview" width="100%">
+</p>
 
 ## 🚀 Core Capabilities
 
