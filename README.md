@@ -1,8 +1,4 @@
 <p align="center">
-  <img src="images/github_banner.jpg" alt="Android TCP Sniffer Banner" width="100%">
-</p>
-
-<p align="center">
   <img src="images/logo.jpg" alt="Android TCP Sniffer Logo" width="100" style="border-radius: 20px;">
 </p>
 
@@ -20,7 +16,7 @@
 </p>
 
 <p align="center">
-  <i>Zero proxy configuration &bull; No CA certificates &bull; 100% immunity to SSL pinning</i>
+  <img src="images/github_banner.jpg" alt="Android TCP Sniffer Banner" width="100%">
 </p>
 
 ---
