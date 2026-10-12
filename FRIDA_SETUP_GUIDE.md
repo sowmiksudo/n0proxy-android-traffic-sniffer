@@ -100,12 +100,12 @@ adb push frida-server /data/local/tmp/
 
 ### 2. Grant executable permissions:
 ```bash
-adb shell "su -c 'chmod 755 /data/local/tmp/frida-server'"
+adb shell "su -c 'chmod 777 /data/local/tmp/frida-server'"
 ```
 
 ### 3. Start `frida-server` in background:
 ```bash
-adb shell "su -c '/data/local/tmp/frida-server > /dev/null 2>&1 &'"
+adb shell "su -c 'chmod 777 /data/local/tmp/frida-server && /data/local/tmp/frida-server > /dev/null 2>&1 &'"
 ```
 
 > [!NOTE]
@@ -175,10 +175,10 @@ with lzma.open(filename) as f_in, open("frida-server", "wb") as f_out:
 
 print("[*] Pushing to device ...")
 subprocess.run(["adb", "push", "frida-server", "/data/local/tmp/frida-server"], check=True)
-subprocess.run(["adb", "shell", "su -c 'chmod 755 /data/local/tmp/frida-server'"], check=True)
+subprocess.run(["adb", "shell", "su -c 'chmod 777 /data/local/tmp/frida-server'"], check=True)
 
 print("[*] Starting frida-server ...")
-subprocess.run(["adb", "shell", "su -c '/data/local/tmp/frida-server &'"], check=True)
+subprocess.run(["adb", "shell", "su -c 'chmod 777 /data/local/tmp/frida-server && /data/local/tmp/frida-server > /dev/null 2>&1 &'"], check=True)
 print("[✓] Frida server is up and running!")
 ```
 
@@ -189,7 +189,7 @@ print("[✓] Frida server is up and running!")
 ### 1. `frida-server` stops when phone restarts
 Android's `/data/local/tmp` preserves the binary, but the process terminates on phone reboot. After restarting your phone, just run:
 ```bash
-adb shell "su -c '/data/local/tmp/frida-server &'"
+adb shell "su -c 'chmod 777 /data/local/tmp/frida-server && /data/local/tmp/frida-server > /dev/null 2>&1 &'"
 ```
 Alternatively, install the **MagiskFrida** module in Magisk/KernelSU to automatically start `frida-server` on boot.
 
@@ -206,3 +206,31 @@ If you do not have root access on your phone:
   adb install myapp.objection.apk
   ```
   Once the patched app is opened on the phone, Frida can attach to it without root.
+
+---
+
+## Importing Captured Traffic into Burp Suite & Other Proxies
+
+Android TCP Sniffer supports exporting captured and decrypted HTTPS traffic directly into formats readable by **Burp Suite**, **Caido**, **OWASP ZAP**, **Postman**, and **Wireshark**:
+
+### 1. Burp Suite XML Export (`--burp capture.xml`)
+Export directly to Burp Suite's native XML items format:
+```bash
+python analyzer.py com.example.app --burp burp_traffic.xml
+```
+**How to import into Burp Suite:**
+- **Burp Suite Professional**: Go to **Target** tab → right-click anywhere in **Site map** → choose **Restore items** → select `burp_traffic.xml`. All captured endpoints, requests, and responses will populate into your Target tree and Repeater/Intruder.
+- **Burp Suite Community**: Install the free **Burp Import** or **HTTP History Importer** extension from the BApp Store or GitHub, then import `burp_traffic.xml` directly into your **HTTP history** tab.
+
+### 2. Universal HAR Export (`--har capture.har`)
+Export to standard **HTTP Archive 1.2 (`.har`)**:
+```bash
+python analyzer.py com.example.app --har capture.har
+```
+**Compatible with:**
+- **Burp Suite**: Via the **HAR Importer** BApp plugin.
+- **Caido**: Settings / Import HAR or drag-and-drop into Replay.
+- **OWASP ZAP**: Import → Import HAR file.
+- **Postman**: Import → select `.har` file to convert into a collection.
+- **Chrome / Firefox DevTools**: Network tab → Import HAR.
+

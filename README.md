@@ -1,25 +1,24 @@
 # Android TCP Traffic Sniffer
 
-A lightweight Python + Frida tool to **intercept, inspect, and analyze TCP/SSL traffic** from Android applications in real-time — without proxies or certificates.
+A lightweight Python + Frida tool to **intercept, decrypt, and export Android application traffic directly into Burp Suite, Caido, OWASP ZAP, and Wireshark** in real-time — with **zero proxy configuration**, **no CA certificates**, and **100% immunity to SSL pinning**.
 
-Unlike proxy tools (Charles / Burp Suite) that require configuring WiFi settings and installing CA certificates, this tool hooks directly into Android's native `libc.so` and `libssl.so` to capture data before it leaves the process.
+Unlike traditional proxy setups that require complex Wi-Fi proxies, iptables redirection, and custom user certificate injection (which modern Android apps often block with Certificate Pinning or custom BoringSSL/Cronet/Flutter stacks), **Android TCP Sniffer hooks directly into Android's native memory space** (`libc.so`, `libssl.so`, `libboringssl.so`) to capture cleartext data before encryption. It automatically reassembles fragmented TCP streams into HTTP flows and exports them directly into industry-standard pentesting tools.
 
 ![TCP Sniffer](images/tcp-sniffer.png)
 
-## 🚀 Features
+## 🚀 Core Capabilities
 
-- **No Proxy Required** — works on any app, even those ignoring system proxy settings.
-- **Raw TCP & Decrypted SSL** — capture raw socket traffic, decrypted TLS cleartext, or both simultaneously.
-- **IP:Port Resolution** — see exactly where traffic goes (`192.168.1.5:48210 → 142.250.180.46:443`), not just socket numbers.
-- **Protocol Detection** — auto-identifies HTTP requests/responses, TLS handshakes with SNI hostnames, and JSON payloads.
-- **Wireshark Export** — save captured traffic to `.pcap` files and open them directly in Wireshark.
-- **JSON Logging** — export packets to machine-readable JSON-lines format for scripting and analysis.
-- **Interactive App Picker** — run without arguments and choose from running apps on the device.
-- **Keyword Filtering** — filter live output by keyword (e.g., `password`, `token`, `GET`).
-- **Setup Diagnostics** — built-in `--doctor` command checks Python, ADB, Frida, and device connectivity.
-- **Smart Filtering** — automatically ignores non-socket file descriptors to prevent log flooding.
-- **JSON Pretty-Print** — auto-detects and pretty-prints JSON request/response bodies.
-- **Capture Summary** — on exit, see total packets, bytes, direction breakdown, and unique endpoints.
+- **🎯 Native Burp Suite Export (`--burp`)** — export decrypted HTTPS traffic directly into Burp Suite XML items. Right-click **Target → Restore items** in Burp Suite to inspect, replay, or scan pinned app traffic!
+- **🌐 Universal HAR 1.2 Export (`--har`)** — export standard HTTP Archive files compatible with **Burp Suite**, **Caido**, **OWASP ZAP**, **Postman**, and browser DevTools.
+- **🦈 Wireshark PCAP Export (`--pcap`)** — stream synthetic IPv4+TCP packets into Wireshark-compatible `.pcap` files with zero external dependencies.
+- **🔓 Zero-Proxy & Pinning-Proof** — works on any app, including those with hardcoded certificate pins, Flutter apps, gRPC streams, or apps ignoring system proxies.
+- **⚡ Raw TCP & Decrypted SSL** — inspect raw socket traffic (`send`/`recv`), decrypted TLS cleartext (`SSL_write`/`SSL_read`), or both simultaneously.
+- **📍 Real Endpoint Resolution** — shows exact source and destination endpoints (`192.168.1.5:48210 → 142.250.180.46:443`), not just opaque file descriptors.
+- **🔍 Protocol Detection & SNI Parsing** — automatically identifies HTTP requests/responses, TLS handshakes with SNI hostnames, and JSON payloads.
+- **📄 JSON-Lines Logging (`-o`)** — stream structured JSON records with timestamps, hex, and UTF-8 decoded data for automated pipelines.
+- **🎯 Live Keyword Filtering (`-f`)** — filter output in real-time by keyword (e.g., `password`, `token`, `GET`).
+- **📱 Interactive App Picker** — run with no arguments to pick from currently running apps with a single keystroke.
+- **🩺 Setup Diagnostics (`--doctor`)** — built-in diagnostic suite validates Python, Frida, ADB, SELinux mode, and phone daemon health in seconds.
 
 ## 📋 Prerequisites
 
@@ -53,9 +52,9 @@ python analyzer.py
 
 ```
 usage: android-tcp-sniffer [-h] [-m {tcp,ssl,all}] [-a] [-d DEVICE]
-                           [--pcap FILE] [-o FILE] [-f FILTER] [-l]
-                           [--doctor] [--no-hexdump]
-                           [target]
+                           [--pcap FILE] [--burp FILE] [--har FILE]
+                           [-o FILE] [-f FILTER] [-l] [--doctor]
+                           [--no-hexdump] [target]
 
 positional arguments:
   target                Package name or PID (interactive picker if omitted)
@@ -69,12 +68,78 @@ options:
   -a, --attach          Attach to a running process instead of spawning
   -d, --device DEVICE   Frida device ID (default: first USB device)
   --pcap FILE           Save traffic to a Wireshark-compatible PCAP file
+  --burp FILE           Save HTTP/HTTPS traffic to Burp Suite XML items file
+  --har FILE            Save HTTP/HTTPS traffic to standard HAR file (Burp/Caido/ZAP)
   -o, --output FILE     Save packets to a JSON-lines log file
   -f, --filter FILTER   Only show packets matching this keyword (case-insensitive)
   -l, --list            List running processes on the device
   --doctor              Run setup diagnostics
   --no-hexdump          Show only summary lines, suppress payload display
 ```
+
+## 🎯 Core Highlight: Multi-Tool Export Suite (Burp, Caido, ZAP, Wireshark)
+
+> [!IMPORTANT]
+> **Why this is the heart of Android TCP Sniffer:**
+> Getting mobile app traffic into a proxy like **Burp Suite** or **Caido** has become painful due to modern mobile security mechanisms:
+> - ❌ Apps implement **SSL Certificate Pinning** (`NetworkSecurityConfig`, OkHttp `CertificatePinner`, TrustKit, or custom C++ verifiers).
+> - ❌ Apps bypass the Android OS network stack entirely using **Flutter (Dart SSL)**, **Google Cronet**, or **native BoringSSL**.
+> - ❌ Apps explicitly ignore system Wi-Fi proxy settings.
+>
+> **Android TCP Sniffer eliminates these roadblocks completely.** By intercepting cleartext payloads directly within the process memory space immediately before encryption (`SSL_write`) or after decryption (`SSL_read`), it bypasses all certificate pinning and proxy restrictions. It then reassembles fragmented TCP streams into complete HTTP flows and exports them directly into whichever pentesting software your workflow relies on.
+
+### 📊 Supported Export Formats Matrix
+
+| Pentesting / Analysis Tool | CLI Flag | Output Format | How to Import |
+|---|---|---|---|
+| **Burp Suite Professional** | `--burp capture.xml` | Native Burp Items XML (Base64) | **Target** tab → Right-click **Site map** → **Restore items** → Select `capture.xml` |
+| **Burp Suite Community** | `--burp capture.xml` or `--har capture.har` | Burp XML / HAR 1.2 | Import via BApp extensions: **Burp Import**, **HTTP History Importer**, or **HAR Importer** |
+| **Caido** | `--har capture.har` | HTTP Archive 1.2 | In Caido: Go to **Replay** / Settings → Drag & drop or **Import HAR** |
+| **OWASP ZAP** | `--har capture.har` | HTTP Archive 1.2 | In ZAP: Menu **Import** → **Import a HAR file** |
+| **Postman** | `--har capture.har` | HTTP Archive 1.2 | In Postman: **Import** → Select `.har` to auto-generate a runnable API collection |
+| **Wireshark** | `--pcap capture.pcap` | Standard PCAP (LINKTYPE_RAW) | In Wireshark: **File** → **Open** → Full packet dissection with TCP reassembly |
+| **Automated Pipelines / SIEM** | `-o session.json` | Structured JSON-Lines | Line-delimited JSON with timestamps, hex, and decoded strings |
+
+---
+
+### 🛠️ Export Workflows & Step-by-Step Guides
+
+#### 1. Exporting Directly into Burp Suite
+Bypass all SSL pinning and view decrypted app traffic directly in Burp Suite's Target sitemap and Repeater:
+```bash
+python analyzer.py com.example.app --burp burp_traffic.xml
+```
+- **In Burp Suite Professional:**
+  1. Open Burp Suite and navigate to the **Target** tab.
+  2. Right-click anywhere in the **Site map** pane.
+  3. Select **Restore items** from the context menu.
+  4. Select `burp_traffic.xml`.
+  5. Every endpoint, request header, query parameter, body, and server response immediately populates your Site Map tree and can be sent straight to **Repeater (Ctrl+R)**, **Intruder**, or **Scanner**!
+- **In Burp Suite Community:**
+  1. Open Burp's **Extender / Extensions** tab → **BApp Store**.
+  2. Install **Burp Import** or **HTTP History Importer**.
+  3. Load `burp_traffic.xml` directly into your **HTTP history** tab.
+
+#### 2. Exporting Universal HAR for Caido & OWASP ZAP
+Export all captured HTTP/HTTPS traffic to the universal HTTP Archive standard:
+```bash
+python analyzer.py com.example.app --har capture.har
+```
+- **Caido:** Navigate to **Replay** or **Settings → Import**, then drop `capture.har` in.
+- **OWASP ZAP:** Go to **Import → Import a HAR file**.
+- **Postman:** Go to **Import**, select `capture.har`, and Postman will automatically generate organized HTTP requests and environments.
+
+#### 3. Simultaneous Multi-Format Capture (All-in-One)
+You can combine flags to generate Wireshark PCAPs, Burp XML, HAR files, and JSON logs simultaneously in a single session:
+```bash
+python analyzer.py com.example.app \
+  --burp burp.xml \
+  --har capture.har \
+  --pcap traffic.pcap \
+  -o session.json
+```
+
+---
 
 ## 📝 Usage Examples
 
@@ -247,7 +312,7 @@ android-tcp-sniffer/
 | Problem | Solution |
 |---------|----------|
 | `need Gadget to attach on jailed Android` | `frida-server` is not installed or running. See [FRIDA_SETUP_GUIDE.md](FRIDA_SETUP_GUIDE.md) |
-| `Frida server is not running` | Start the server: `adb shell "su -c '/data/local/tmp/frida-server > /dev/null 2>&1 &'"` |
+| `Frida server is not running` | Start the server: `adb shell "su -c 'chmod 777 /data/local/tmp/frida-server && /data/local/tmp/frida-server > /dev/null 2>&1 &'"` |
 | `Process not found` | Check the package name with `python analyzer.py --list` |
 | Logs are garbled / unreadable | The traffic is TLS encrypted. Use `--mode ssl` (the default) to see cleartext |
 | Version mismatch errors | Ensure frida-server on device matches `python -c "import frida; print(frida.__version__)"` |

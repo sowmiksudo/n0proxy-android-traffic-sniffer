@@ -21,6 +21,10 @@ import textwrap
 import subprocess
 import shutil
 import threading
+import re
+import base64
+import urllib.parse
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
 # On Windows, ensure stdout & stderr handle UTF-8 console output without charmap crashes
@@ -356,6 +360,432 @@ def format_hexdump(data, max_bytes=256):
     return "\n".join(lines)
 
 
+
+# ─────────────────────────────────────────────────────────────
+#  Burp Suite & HAR Exporters (HTTP Flow Reassembly)
+# ─────────────────────────────────────────────────────────────
+
+class HttpTransaction:
+    """Represents a single HTTP request-response transaction."""
+    def __init__(self, request_raw, response_raw=None, remote=None, local=None, is_ssl=True, start_ts=None, end_ts=None):
+        self.request_raw = bytes(request_raw) if request_raw else b""
+        self.response_raw = bytes(response_raw) if response_raw else b""
+        self.remote = remote or {}
+        self.local = local or {}
+        self.is_ssl = is_ssl
+        self.start_ts = start_ts or time.time()
+        self.end_ts = end_ts or (self.start_ts + 0.05)
+
+        self.req_method = "GET"
+        self.req_path = "/"
+        self.req_version = "HTTP/1.1"
+        self.req_headers = []
+        self.req_headers_dict = {}
+        self.req_body = b""
+        self._parse_request()
+
+        self.res_version = "HTTP/1.1"
+        self.res_status = 0
+        self.res_status_text = ""
+        self.res_headers = []
+        self.res_headers_dict = {}
+        self.res_body = b""
+        if self.response_raw:
+            self._parse_response()
+
+    def _parse_request(self):
+        if not self.request_raw:
+            return
+        parts = self.request_raw.split(b"\r\n\r\n", 1)
+        if len(parts) == 1:
+            parts = self.request_raw.split(b"\n\n", 1)
+        header_block = parts[0].decode("iso-8859-1", errors="replace")
+        self.req_body = parts[1] if len(parts) > 1 else b""
+        lines = header_block.splitlines()
+        if lines:
+            line_parts = lines[0].split(None, 2)
+            if len(line_parts) >= 2:
+                self.req_method = line_parts[0]
+                self.req_path = line_parts[1]
+                if len(line_parts) > 2:
+                    self.req_version = line_parts[2]
+            for line in lines[1:]:
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    k_str, v_str = k.strip(), v.strip()
+                    self.req_headers.append((k_str, v_str))
+                    self.req_headers_dict[k_str.lower()] = v_str
+
+    def _parse_response(self):
+        parts = self.response_raw.split(b"\r\n\r\n", 1)
+        if len(parts) == 1:
+            parts = self.response_raw.split(b"\n\n", 1)
+        header_block = parts[0].decode("iso-8859-1", errors="replace")
+        self.res_body = parts[1] if len(parts) > 1 else b""
+        lines = header_block.splitlines()
+        if lines:
+            line_parts = lines[0].split(None, 2)
+            if len(line_parts) >= 2:
+                self.res_version = line_parts[0]
+                try:
+                    self.res_status = int(line_parts[1])
+                except ValueError:
+                    self.res_status = 200
+                if len(line_parts) > 2:
+                    self.res_status_text = line_parts[2]
+            for line in lines[1:]:
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    k_str, v_str = k.strip(), v.strip()
+                    self.res_headers.append((k_str, v_str))
+                    self.res_headers_dict[k_str.lower()] = v_str
+
+    @property
+    def host(self):
+        if "host" in self.req_headers_dict:
+            return self.req_headers_dict["host"].split(":")[0]
+        return self.remote.get("ip", "unknown")
+
+    @property
+    def port(self):
+        if "host" in self.req_headers_dict and ":" in self.req_headers_dict["host"]:
+            try:
+                return int(self.req_headers_dict["host"].split(":")[1])
+            except ValueError:
+                pass
+        return self.remote.get("port", 443 if self.is_ssl else 80)
+
+    @property
+    def protocol(self):
+        return "https" if self.is_ssl or self.port == 443 else "http"
+
+    @property
+    def url(self):
+        path = self.req_path
+        if path.startswith("http://") or path.startswith("https://"):
+            return path
+        scheme = self.protocol
+        host = self.host
+        port = self.port
+        if (scheme == "https" and port == 443) or (scheme == "http" and port == 80):
+            return f"{scheme}://{host}{path}"
+        return f"{scheme}://{host}:{port}{path}"
+
+
+class BurpXmlWriter:
+    """Exports HTTP transactions to Burp Suite XML format (native Target/Site Map restore format)."""
+    def __init__(self, filename):
+        self.filename = filename
+        self.transactions = []
+
+    def add(self, tx):
+        self.transactions.append(tx)
+
+    def write(self):
+        now_str = datetime.now().strftime("%a %b %d %H:%M:%S %Z %Y")
+        root = ET.Element("items", burpVersion="2023.1.1", exportTime=now_str)
+        for tx in self.transactions:
+            item = ET.SubElement(root, "item")
+            ET.SubElement(item, "time").text = datetime.fromtimestamp(tx.start_ts).strftime("%a %b %d %H:%M:%S %Z %Y")
+            ET.SubElement(item, "url").text = tx.url
+            host_elem = ET.SubElement(item, "host", ip=str(tx.remote.get("ip", "")))
+            host_elem.text = tx.host
+            ET.SubElement(item, "port").text = str(tx.port)
+            ET.SubElement(item, "protocol").text = tx.protocol
+            ET.SubElement(item, "method").text = tx.req_method
+            ET.SubElement(item, "path").text = tx.req_path
+
+            clean_path = tx.req_path.split("?")[0]
+            ext = clean_path.rsplit(".", 1)[-1] if "." in clean_path else "null"
+            ET.SubElement(item, "extension").text = ext if len(ext) < 10 else "null"
+
+            req_elem = ET.SubElement(item, "request", base64="true")
+            req_elem.text = base64.b64encode(tx.request_raw).decode("ascii") if tx.request_raw else ""
+
+            ET.SubElement(item, "status").text = str(tx.res_status)
+            ET.SubElement(item, "responselength").text = str(len(tx.response_raw))
+
+            content_type = tx.res_headers_dict.get("content-type", "")
+            mimetype = content_type.split(";")[0].strip() if content_type else "HTML"
+            ET.SubElement(item, "mimetype").text = mimetype
+
+            res_elem = ET.SubElement(item, "response", base64="true")
+            res_elem.text = base64.b64encode(tx.response_raw).decode("ascii") if tx.response_raw else ""
+            ET.SubElement(item, "comment").text = "Decrypted via Android TCP Sniffer"
+
+        tree = ET.ElementTree(root)
+        ET.indent(tree, space="  ", level=0)
+        tree.write(self.filename, encoding="utf-8", xml_declaration=True)
+
+
+class HarWriter:
+    """Exports HTTP transactions to standard HTTP Archive 1.2 (HAR) format."""
+    def __init__(self, filename):
+        self.filename = filename
+        self.transactions = []
+
+    def add(self, tx):
+        self.transactions.append(tx)
+
+    def write(self):
+        entries = []
+        for tx in self.transactions:
+            dt_str = datetime.fromtimestamp(tx.start_ts, tz=timezone.utc).isoformat()
+            duration_ms = max(1.0, (tx.end_ts - tx.start_ts) * 1000)
+
+            query_params = []
+            if "?" in tx.req_path:
+                q_str = tx.req_path.split("?", 1)[1]
+                for q_pair in urllib.parse.parse_qsl(q_str, keep_blank_values=True):
+                    query_params.append({"name": q_pair[0], "value": q_pair[1]})
+
+            post_data = None
+            if tx.req_body:
+                mime = tx.req_headers_dict.get("content-type", "application/octet-stream")
+                try:
+                    text_content = tx.req_body.decode("utf-8")
+                    post_data = {"mimeType": mime, "text": text_content}
+                except UnicodeDecodeError:
+                    post_data = {"mimeType": mime, "text": base64.b64encode(tx.req_body).decode("ascii")}
+
+            content_obj = {
+                "size": len(tx.res_body),
+                "mimeType": tx.res_headers_dict.get("content-type", "application/octet-stream"),
+            }
+            if tx.res_body:
+                try:
+                    content_obj["text"] = tx.res_body.decode("utf-8")
+                except UnicodeDecodeError:
+                    content_obj["text"] = base64.b64encode(tx.res_body).decode("ascii")
+                    content_obj["encoding"] = "base64"
+            else:
+                content_obj["text"] = ""
+
+            entry = {
+                "startedDateTime": dt_str,
+                "time": round(duration_ms, 2),
+                "request": {
+                    "method": tx.req_method,
+                    "url": tx.url,
+                    "httpVersion": tx.req_version,
+                    "cookies": [],
+                    "headers": [{"name": k, "value": v} for k, v in tx.req_headers],
+                    "queryString": query_params,
+                    "headersSize": len(tx.request_raw) - len(tx.req_body),
+                    "bodySize": len(tx.req_body)
+                },
+                "response": {
+                    "status": tx.res_status,
+                    "statusText": tx.res_status_text,
+                    "httpVersion": tx.res_version,
+                    "cookies": [],
+                    "headers": [{"name": k, "value": v} for k, v in tx.res_headers],
+                    "content": content_obj,
+                    "redirectURL": tx.res_headers_dict.get("location", ""),
+                    "headersSize": len(tx.response_raw) - len(tx.res_body),
+                    "bodySize": len(tx.res_body)
+                },
+                "cache": {},
+                "timings": {
+                    "send": 0,
+                    "wait": round(duration_ms, 2),
+                    "receive": 0
+                },
+                "serverIPAddress": str(tx.remote.get("ip", ""))
+            }
+            if post_data:
+                entry["request"]["postData"] = post_data
+            entries.append(entry)
+
+        har_data = {
+            "log": {
+                "version": "1.2",
+                "creator": {"name": "Android TCP Sniffer", "version": "1.0.0"},
+                "pages": [],
+                "entries": entries
+            }
+        }
+        with open(self.filename, "w", encoding="utf-8") as f:
+            json.dump(har_data, f, indent=2, ensure_ascii=False)
+
+
+class HttpFlowTracker:
+    """Reassembles fragmented TCP/SSL streams into complete HTTP transactions."""
+    HTTP_METHODS = (b"GET ", b"POST ", b"PUT ", b"DELETE ", b"HEAD ", b"OPTIONS ", b"PATCH ", b"CONNECT ", b"TRACE ")
+
+    def __init__(self, on_transaction):
+        self.on_transaction = on_transaction
+        self.streams = {}
+
+    def _get_key(self, socket_id, remote_info, local_info):
+        if socket_id and socket_id > 0:
+            return f"sock_{socket_id}"
+        if remote_info and remote_info.get("ip") and remote_info.get("port"):
+            return f"{remote_info.get('ip')}:{remote_info.get('port')}"
+        return "default"
+
+    def process_packet(self, direction, func_name, socket_id, data, local_info, remote_info, timestamp):
+        if not data:
+            return
+        key = self._get_key(socket_id, remote_info, local_info)
+        if key not in self.streams:
+            self.streams[key] = {
+                "out_buf": b"",
+                "in_buf": b"",
+                "pending": [],
+                "local": local_info,
+                "remote": remote_info,
+                "is_ssl": "ssl" in func_name.lower(),
+                "last_ts": timestamp
+            }
+        stream = self.streams[key]
+        if local_info: stream["local"] = local_info
+        if remote_info: stream["remote"] = remote_info
+        stream["last_ts"] = timestamp
+        if "ssl" in func_name.lower():
+            stream["is_ssl"] = True
+
+        if direction == "OUT":
+            stream["out_buf"] += bytes(data)
+            self._parse_requests(stream)
+        else:
+            stream["in_buf"] += bytes(data)
+            self._parse_responses(stream)
+
+    def _parse_requests(self, stream):
+        while True:
+            buf = stream["out_buf"]
+            if not buf:
+                break
+            idx = buf.find(b"\r\n\r\n")
+            delim_len = 4
+            if idx == -1:
+                idx = buf.find(b"\n\n")
+                delim_len = 2
+            if idx == -1:
+                break
+
+            head = buf[:idx]
+            is_http = any(head.startswith(m) for m in self.HTTP_METHODS)
+            if not is_http:
+                break
+
+            body_start = idx + delim_len
+            cl_match = re.search(rb"(?i)\r?\ncontent-length\s*:\s*(\d+)", head)
+            if cl_match:
+                cl = int(cl_match.group(1))
+                total_len = body_start + cl
+                if len(buf) < total_len:
+                    break
+                raw_req = buf[:total_len]
+                stream["out_buf"] = buf[total_len:]
+                stream["pending"].append((raw_req, stream["last_ts"]))
+            else:
+                te_match = re.search(rb"(?i)\r?\ntransfer-encoding\s*:\s*chunked", head)
+                if te_match:
+                    term_idx = buf.find(b"0\r\n\r\n", body_start)
+                    if term_idx == -1:
+                        break
+                    total_len = term_idx + 5
+                    raw_req = buf[:total_len]
+                    stream["out_buf"] = buf[total_len:]
+                    stream["pending"].append((raw_req, stream["last_ts"]))
+                else:
+                    raw_req = buf[:body_start]
+                    stream["out_buf"] = buf[body_start:]
+                    stream["pending"].append((raw_req, stream["last_ts"]))
+
+    def _parse_responses(self, stream):
+        while True:
+            buf = stream["in_buf"]
+            if not buf:
+                break
+            idx = buf.find(b"\r\n\r\n")
+            delim_len = 4
+            if idx == -1:
+                idx = buf.find(b"\n\n")
+                delim_len = 2
+            if idx == -1:
+                break
+
+            head = buf[:idx]
+            if not head.startswith(b"HTTP/"):
+                break
+
+            body_start = idx + delim_len
+            cl_match = re.search(rb"(?i)\r?\ncontent-length\s*:\s*(\d+)", head)
+            te_match = re.search(rb"(?i)\r?\ntransfer-encoding\s*:\s*chunked", head)
+
+            if cl_match:
+                cl = int(cl_match.group(1))
+                total_len = body_start + cl
+                if len(buf) < total_len:
+                    break
+                raw_res = buf[:total_len]
+                stream["in_buf"] = buf[total_len:]
+                self._emit_transaction(stream, raw_res)
+            elif te_match:
+                term_idx = buf.find(b"0\r\n\r\n", body_start)
+                if term_idx == -1:
+                    break
+                total_len = term_idx + 5
+                raw_res = buf[:total_len]
+                stream["in_buf"] = buf[total_len:]
+                self._emit_transaction(stream, raw_res)
+            else:
+                status_match = re.match(rb"HTTP/\d\.\d\s+(\d+)", head)
+                if status_match and int(status_match.group(1)) in (204, 304):
+                    raw_res = buf[:body_start]
+                    stream["in_buf"] = buf[body_start:]
+                    self._emit_transaction(stream, raw_res)
+                else:
+                    break
+
+    def _emit_transaction(self, stream, raw_res):
+        if stream["pending"]:
+            raw_req, req_ts = stream["pending"].pop(0)
+        else:
+            raw_req, req_ts = b"", stream["last_ts"]
+        tx = HttpTransaction(
+            request_raw=raw_req,
+            response_raw=raw_res,
+            remote=stream["remote"],
+            local=stream["local"],
+            is_ssl=stream["is_ssl"],
+            start_ts=req_ts,
+            end_ts=stream["last_ts"]
+        )
+        self.on_transaction(tx)
+
+    def flush(self):
+        for stream in self.streams.values():
+            while stream["pending"]:
+                raw_req, req_ts = stream["pending"].pop(0)
+                tx = HttpTransaction(
+                    request_raw=raw_req,
+                    response_raw=stream["in_buf"] if stream["in_buf"] else b"",
+                    remote=stream["remote"],
+                    local=stream["local"],
+                    is_ssl=stream["is_ssl"],
+                    start_ts=req_ts,
+                    end_ts=stream["last_ts"]
+                )
+                stream["in_buf"] = b""
+                self.on_transaction(tx)
+            if stream["in_buf"] and stream["in_buf"].startswith(b"HTTP/"):
+                tx = HttpTransaction(
+                    request_raw=b"",
+                    response_raw=stream["in_buf"],
+                    remote=stream["remote"],
+                    local=stream["local"],
+                    is_ssl=stream["is_ssl"],
+                    start_ts=stream["last_ts"],
+                    end_ts=stream["last_ts"]
+                )
+                stream["in_buf"] = b""
+                self.on_transaction(tx)
+
+
 # ─────────────────────────────────────────────────────────────
 #  Main Sniffer
 # ─────────────────────────────────────────────────────────────
@@ -367,16 +797,36 @@ class Sniffer:
         self.pcap       = None
         self.log_fh     = None
         self.device     = None
-        self.pid        = None
-        self.stop_event = threading.Event()
+        self.pid          = None
+        self.stop_event   = threading.Event()
+        self.burp_writer  = None
+        self.har_writer   = None
+        self.flow_tracker = None
 
         if args.pcap:
             self.pcap = PcapWriter(args.pcap)
-            print(f"  {Fore.CYAN}PCAP:    {args.pcap}{Style.RESET_ALL}")
+            print(f"  {Fore.CYAN}PCAP:     {args.pcap}{Style.RESET_ALL}")
+
+        if args.burp:
+            self.burp_writer = BurpXmlWriter(args.burp)
+            print(f"  {Fore.CYAN}Burp XML: {args.burp}{Style.RESET_ALL}")
+
+        if args.har:
+            self.har_writer = HarWriter(args.har)
+            print(f"  {Fore.CYAN}HAR:      {args.har}{Style.RESET_ALL}")
 
         if args.output:
             self.log_fh = open(args.output, 'w')
-            print(f"  {Fore.CYAN}Log:     {args.output}{Style.RESET_ALL}")
+            print(f"  {Fore.CYAN}Log:      {args.output}{Style.RESET_ALL}")
+
+        if self.burp_writer or self.har_writer:
+            self.flow_tracker = HttpFlowTracker(self._on_http_transaction)
+
+    def _on_http_transaction(self, tx):
+        if self.burp_writer:
+            self.burp_writer.add(tx)
+        if self.har_writer:
+            self.har_writer.add(tx)
 
     # ── Frida message callback ──────────────────────────────
 
@@ -401,6 +851,13 @@ class Sniffer:
         remote_info= payload.get('remote')
         ts_ms      = payload.get('ts', time.time() * 1000)
         timestamp  = ts_ms / 1000.0
+
+        # Feed to Burp / HAR flow tracker
+        if self.flow_tracker and data:
+            self.flow_tracker.process_packet(
+                direction, func_name, socket_id, data,
+                local_info, remote_info, timestamp
+            )
 
         # Stats
         self.stats.record(direction, length, remote_info)
@@ -521,7 +978,7 @@ class Sniffer:
 
     @staticmethod
     def _ensure_selinux_permissive():
-        """Ensure SELinux is set to Permissive on rooted devices to prevent spawn/ptrace timeouts."""
+        """Ensure SELinux is set to Permissive and frida-server has executable permissions."""
         try:
             res = subprocess.run(["adb", "shell", "getenforce"],
                                  capture_output=True, text=True, timeout=3)
@@ -530,6 +987,11 @@ class Sniffer:
                                stdout=subprocess.DEVNULL,
                                stderr=subprocess.DEVNULL,
                                timeout=3)
+            # Ensure frida-server binary has full read/write/executable permissions
+            subprocess.run(["adb", "shell", "su -c 'chmod 777 /data/local/tmp/frida-server'"],
+                           stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL,
+                           timeout=3)
         except Exception:
             pass
 
@@ -718,18 +1180,36 @@ class Sniffer:
 
         # Frida Server on Device
         if device:
+            server_running = False
+            proc_count = 0
+            err_msg = None
             try:
                 procs = device.enumerate_processes()
-                checks.append(("Frida Server", f"running & responsive ({len(procs)} processes)", True, None))
+                proc_count = len(procs)
+                # On USB devices, Frida may fall back to ADB process enumeration even if frida-server is down.
+                # Verify that frida-server is actively running as a daemon.
+                server_running = any('frida-server' in p.name.lower() for p in procs)
+                if not server_running:
+                    # Also double check via pidof
+                    p_res = subprocess.run(["adb", "shell", "su -c 'pidof frida-server'"],
+                                           capture_output=True, text=True, timeout=3)
+                    if p_res.stdout.strip():
+                        server_running = True
             except frida.ServerNotRunningError:
-                checks.append(("Frida Server", "NOT RUNNING on device", False,
-                               'Start it: adb shell "su -c \'/data/local/tmp/frida-server > /dev/null 2>&1 &\'"'))
+                server_running = False
             except frida.PermissionDeniedError:
+                err_msg = "permission denied (root required)"
+            except Exception as e:
+                err_msg = str(e)
+
+            if server_running:
+                checks.append(("Frida Server", f"running & responsive ({proc_count} processes)", True, None))
+            elif err_msg == "permission denied (root required)":
                 checks.append(("Frida Server", "permission denied (root required)", False,
                                "frida-server requires root permissions"))
-            except Exception as e:
-                checks.append(("Frida Server", f"error: {e}", False,
-                               'Verify frida-server is running: adb shell "su -c \'/data/local/tmp/frida-server > /dev/null 2>&1 &\'"'))
+            else:
+                checks.append(("Frida Server", "NOT RUNNING on device", False,
+                               'Start it: adb shell "su -c \'chmod 777 /data/local/tmp/frida-server && /data/local/tmp/frida-server > /dev/null 2>&1 &\'"'))
 
         # SELinux Mode
         if device:
@@ -924,12 +1404,12 @@ class Sniffer:
             print('      Run: adb shell "su -c setenforce 0"')
         except frida.ServerNotRunningError:
             print(f"\n  {Fore.RED}[-] Frida server is not running on the device.{Style.RESET_ALL}")
-            print('      Start it:  adb shell "su -c \'/data/local/tmp/frida-server > /dev/null 2>&1 &\'"')
+            print('      Start it:  adb shell "su -c \'chmod 777 /data/local/tmp/frida-server && /data/local/tmp/frida-server > /dev/null 2>&1 &\'"')
             print('      Setup:     See FRIDA_SETUP_GUIDE.md for download & installation instructions.')
         except frida.NotSupportedError as e:
             print(f"\n  {Fore.RED}[-] Frida cannot attach (server not running or jailed Android):{Style.RESET_ALL}")
             print(f"      {e}")
-            print('      Start it:  adb shell "su -c \'/data/local/tmp/frida-server > /dev/null 2>&1 &\'"')
+            print('      Start it:  adb shell "su -c \'chmod 777 /data/local/tmp/frida-server && /data/local/tmp/frida-server > /dev/null 2>&1 &\'"')
             print('      Setup:     See FRIDA_SETUP_GUIDE.md for download & installation instructions.')
         except frida.ProcessNotFoundError:
             print(f"\n  {Fore.RED}[-] Process '{target}' not found.{Style.RESET_ALL}")
@@ -945,9 +1425,20 @@ class Sniffer:
         if self.stats.total_packets > 0:
             print(self.stats.summary())
 
+        if self.flow_tracker:
+            self.flow_tracker.flush()
+
+        if self.burp_writer:
+            self.burp_writer.write()
+            print(f"  {Fore.CYAN}[*] Burp XML saved → {self.args.burp} (Import via Target > Restore items or Burp Import){Style.RESET_ALL}")
+
+        if self.har_writer:
+            self.har_writer.write()
+            print(f"  {Fore.CYAN}[*] HAR log saved  → {self.args.har} (Import into Burp, Caido, ZAP, or DevTools){Style.RESET_ALL}")
+
         if self.pcap:
             self.pcap.close()
-            print(f"  {Fore.CYAN}[*] PCAP saved → {self.args.pcap}{Style.RESET_ALL}")
+            print(f"  {Fore.CYAN}[*] PCAP saved     → {self.args.pcap}{Style.RESET_ALL}")
 
         if self.log_fh:
             self.log_fh.close()
@@ -974,6 +1465,8 @@ def build_parser():
               %(prog)s com.example.app                       # spawn & sniff SSL
               %(prog)s com.example.app -m tcp                # raw TCP sockets only
               %(prog)s com.example.app -m all --pcap out.pcap
+              %(prog)s com.example.app --burp capture.xml    # export for Burp Suite
+              %(prog)s com.example.app --har capture.har     # export HAR (Burp/Caido/ZAP)
               %(prog)s com.example.app --attach              # attach to running app
               %(prog)s com.example.app -f "password"         # filter by keyword
               %(prog)s com.example.app -o session.json       # save JSON log
@@ -998,6 +1491,12 @@ def build_parser():
     parser.add_argument(
         '--pcap', metavar='FILE',
         help='Save traffic to a Wireshark-compatible PCAP file')
+    parser.add_argument(
+        '--burp', metavar='FILE',
+        help='Save HTTP/HTTPS traffic to a Burp Suite-compatible XML file (import via Target > Restore items or Burp Import)')
+    parser.add_argument(
+        '--har', metavar='FILE',
+        help='Save HTTP/HTTPS traffic to a standard HAR file (importable into Burp Suite, Caido, ZAP, DevTools)')
     parser.add_argument(
         '-o', '--output', metavar='FILE',
         help='Save packets to a JSON-lines log file')
